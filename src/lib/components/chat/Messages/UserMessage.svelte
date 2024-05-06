@@ -1,11 +1,13 @@
 <script lang="ts">
 	import dayjs from 'dayjs';
 
-	import { tick, createEventDispatcher } from 'svelte';
+	import { tick, createEventDispatcher, getContext } from 'svelte';
 	import Name from './Name.svelte';
 	import ProfileImage from './ProfileImage.svelte';
 	import { modelfiles, settings } from '$lib/stores';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+
+	const i18n = getContext('i18n');
 
 	const dispatch = createEventDispatcher();
 
@@ -13,6 +15,7 @@
 	export let message;
 	export let siblings;
 	export let isFirstMessage: boolean;
+	export let readOnly: boolean;
 
 	export let confirmEditMessage: Function;
 	export let showPreviousMessage: Function;
@@ -65,17 +68,18 @@
 					{#if $modelfiles.map((modelfile) => modelfile.tagName).includes(message.user)}
 						{$modelfiles.find((modelfile) => modelfile.tagName === message.user)?.title}
 					{:else}
-						You <span class=" text-gray-500 text-sm font-medium">{message?.user ?? ''}</span>
+						{$i18n.t('You')}
+						<span class=" text-gray-500 text-sm font-medium">{message?.user ?? ''}</span>
 					{/if}
 				{:else if $settings.showUsername}
 					{user.name}
 				{:else}
-					You
+					{$i18n.t('You')}
 				{/if}
 
 				{#if message.timestamp}
 					<span class=" invisible group-hover:visible text-gray-400 text-xs font-medium">
-						{dayjs(message.timestamp * 1000).format('DD/MM/YYYY HH:mm')}
+						{dayjs(message.timestamp * 1000).format($i18n.t('DD/MM/YYYY HH:mm'))}
 					</span>
 				{/if}
 			</Name>
@@ -123,7 +127,7 @@
 											{file.name}
 										</div>
 
-										<div class=" text-gray-500 text-sm">Document</div>
+										<div class=" text-gray-500 text-sm">{$i18n.t('Document')}</div>
 									</div>
 								</button>
 							{:else if file.type === 'collection'}
@@ -152,7 +156,7 @@
 											{file?.title ?? `#${file.name}`}
 										</div>
 
-										<div class=" text-gray-500 text-sm">Collection</div>
+										<div class=" text-gray-500 text-sm">{$i18n.t('Collection')}</div>
 									</div>
 								</button>
 							{/if}
@@ -172,25 +176,39 @@
 							e.target.style.height = '';
 							e.target.style.height = `${e.target.scrollHeight}px`;
 						}}
+						on:keydown={(e) => {
+							if (e.key === 'Escape') {
+								document.getElementById('close-edit-message-button')?.click();
+							}
+
+							const isCmdOrCtrlPressed = e.metaKey || e.ctrlKey;
+							const isEnterPressed = e.key === 'Enter';
+
+							if (isCmdOrCtrlPressed && isEnterPressed) {
+								document.getElementById('save-edit-message-button')?.click();
+							}
+						}}
 					/>
 
 					<div class=" mt-2 mb-1 flex justify-center space-x-2 text-sm font-medium">
 						<button
-							class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-gray-100 transition rounded-lg"
+							id="save-edit-message-button"
+							class="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-gray-100 transition rounded-lg"
 							on:click={() => {
 								editMessageConfirmHandler();
 							}}
 						>
-							Save & Submit
+							{$i18n.t('Save & Submit')}
 						</button>
 
 						<button
+							id="close-edit-message-button"
 							class=" px-4 py-2 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-100 transition outline outline-1 outline-gray-200 dark:outline-gray-600 rounded-lg"
 							on:click={() => {
 								cancelEditMessage();
 							}}
 						>
-							Cancel
+							{$i18n.t('Cancel')}
 						</button>
 					</div>
 				</div>
@@ -247,31 +265,33 @@
 							</div>
 						{/if}
 
-						<Tooltip content="Edit" placement="bottom">
-							<button
-								class="invisible group-hover:visible p-1 rounded dark:hover:text-white hover:text-black transition edit-user-message-button"
-								on:click={() => {
-									editMessageHandler();
-								}}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									fill="none"
-									viewBox="0 0 24 24"
-									stroke-width="1.5"
-									stroke="currentColor"
-									class="w-4 h-4"
+						{#if !readOnly}
+							<Tooltip content={$i18n.t('Edit')} placement="bottom">
+								<button
+									class="invisible group-hover:visible p-1 rounded dark:hover:text-white hover:text-black transition edit-user-message-button"
+									on:click={() => {
+										editMessageHandler();
+									}}
 								>
-									<path
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125"
-									/>
-								</svg>
-							</button>
-						</Tooltip>
+									<svg
+										xmlns="http://www.w3.org/2000/svg"
+										fill="none"
+										viewBox="0 0 24 24"
+										stroke-width="2"
+										stroke="currentColor"
+										class="w-4 h-4"
+									>
+										<path
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125"
+										/>
+									</svg>
+								</button>
+							</Tooltip>
+						{/if}
 
-						<Tooltip content="Copy" placement="bottom">
+						<Tooltip content={$i18n.t('Copy')} placement="bottom">
 							<button
 								class="invisible group-hover:visible p-1 rounded dark:hover:text-white hover:text-black transition"
 								on:click={() => {
@@ -282,7 +302,7 @@
 									xmlns="http://www.w3.org/2000/svg"
 									fill="none"
 									viewBox="0 0 24 24"
-									stroke-width="1.5"
+									stroke-width="2"
 									stroke="currentColor"
 									class="w-4 h-4"
 								>
@@ -295,8 +315,8 @@
 							</button>
 						</Tooltip>
 
-						{#if !isFirstMessage}
-							<Tooltip content="Delete" placement="bottom">
+						{#if !isFirstMessage && !readOnly}
+							<Tooltip content={$i18n.t('Delete')} placement="bottom">
 								<button
 									class="invisible group-hover:visible p-1 rounded dark:hover:text-white hover:text-black transition"
 									on:click={() => {
@@ -307,7 +327,7 @@
 										xmlns="http://www.w3.org/2000/svg"
 										fill="none"
 										viewBox="0 0 24 24"
-										stroke-width="1.5"
+										stroke-width="2"
 										stroke="currentColor"
 										class="w-4 h-4"
 									>

@@ -1,25 +1,29 @@
 <script lang="ts">
-	import { v4 as uuidv4 } from 'uuid';
+	import { goto } from '$app/navigation';
+	import { user, chats, settings, showSettings, chatId, tags, showSidebar } from '$lib/stores';
+	import { onMount, getContext } from 'svelte';
 
-	import fileSaver from 'file-saver';
-	const { saveAs } = fileSaver;
+	const i18n = getContext('i18n');
 
-	import { goto, invalidateAll } from '$app/navigation';
-	import { page } from '$app/stores';
-	import { user, chats, settings, showSettings, chatId, tags } from '$lib/stores';
-	import { onMount } from 'svelte';
 	import {
 		deleteChatById,
 		getChatList,
 		getChatById,
 		getChatListByTagName,
 		updateChatById,
-		getAllChatTags
+		getAllChatTags,
+		archiveChatById
 	} from '$lib/apis/chats';
 	import { toast } from 'svelte-sonner';
-	import { slide } from 'svelte/transition';
+	import { fade, slide } from 'svelte/transition';
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	import Tooltip from '../common/Tooltip.svelte';
+	import ChatMenu from './Sidebar/ChatMenu.svelte';
+	import ShareChatModal from '../chat/ShareChatModal.svelte';
+	import ArchiveBox from '../icons/ArchiveBox.svelte';
+	import ArchivedChatsModal from './Sidebar/ArchivedChatsModal.svelte';
+
+	const BREAKPOINT = 1024;
 
 	let show = false;
 	let navElement;
@@ -27,18 +31,64 @@
 	let title: string = 'UI';
 	let search = '';
 
+	let shareChatId = null;
+
+	let selectedChatId = null;
+
 	let chatDeleteId = null;
 	let chatTitleEditId = null;
 	let chatTitle = '';
 
+	let showArchivedChatsModal = false;
+	let showShareChatModal = false;
 	let showDropdown = false;
 	let isEditing = false;
 
 	onMount(async () => {
-		if (window.innerWidth > 1024) {
-			show = true;
-		}
+		showSidebar.set(window.innerWidth > BREAKPOINT);
 		await chats.set(await getChatList(localStorage.token));
+
+		let touchstart;
+		let touchend;
+
+		function checkDirection() {
+			const screenWidth = window.innerWidth;
+			const swipeDistance = Math.abs(touchend.screenX - touchstart.screenX);
+			if (touchstart.clientX < 40 && swipeDistance >= screenWidth / 8) {
+				if (touchend.screenX < touchstart.screenX) {
+					showSidebar.set(false);
+				}
+				if (touchend.screenX > touchstart.screenX) {
+					showSidebar.set(true);
+				}
+			}
+		}
+
+		const onTouchStart = (e) => {
+			touchstart = e.changedTouches[0];
+			console.log(touchstart.clientX);
+		};
+
+		const onTouchEnd = (e) => {
+			touchend = e.changedTouches[0];
+			checkDirection();
+		};
+
+		const onResize = () => {
+			if ($showSidebar && window.innerWidth < BREAKPOINT) {
+				showSidebar.set(false);
+			}
+		};
+
+		window.addEventListener('touchstart', onTouchStart);
+		window.addEventListener('touchend', onTouchEnd);
+		window.addEventListener('resize', onResize);
+
+		return () => {
+			window.removeEventListener('touchstart', onTouchStart);
+			window.removeEventListener('touchend', onTouchEnd);
+			window.removeEventListener('resize', onResize);
+		};
 	});
 
 	// Helper function to fetch and add chat content to each chat
@@ -61,12 +111,16 @@
 	};
 
 	const editChatTitle = async (id, _title) => {
-		title = _title;
+		if (_title === '') {
+			toast.error('Title cannot be an empty string.');
+		} else {
+			title = _title;
 
-		await updateChatById(localStorage.token, id, {
-			title: _title
-		});
-		await chats.set(await getChatList(localStorage.token));
+			await updateChatById(localStorage.token, id, {
+				title: _title
+			});
+			await chats.set(await getChatList(localStorage.token));
+		}
 	};
 
 	const deleteChat = async (id) => {
@@ -78,7 +132,10 @@
 		});
 
 		if (res) {
-			goto('/');
+			if ($chatId === id) {
+				goto('/');
+			}
+
 			await chats.set(await getChatList(localStorage.token));
 		}
 	};
@@ -88,26 +145,43 @@
 		localStorage.setItem('settings', JSON.stringify($settings));
 		location.href = '/';
 	};
+
+	const archiveChatHandler = async (id) => {
+		await archiveChatById(localStorage.token, id);
+		await chats.set(await getChatList(localStorage.token));
+	};
 </script>
+
+<ShareChatModal bind:show={showShareChatModal} chatId={shareChatId} />
+<ArchivedChatsModal
+	bind:show={showArchivedChatsModal}
+	on:change={async () => {
+		await chats.set(await getChatList(localStorage.token));
+	}}
+/>
 
 <div
 	bind:this={navElement}
-	class="h-screen max-h-[100dvh] min-h-screen {show
+	id="sidebar"
+	class="h-screen max-h-[100dvh] min-h-screen {$showSidebar
 		? 'lg:relative w-[260px]'
-		: '-translate-x-[260px] w-[0px]'}  bg-black text-gray-200 shadow-2xl text-sm transition z-40 fixed top-0 left-0
+		: '-translate-x-[260px] w-[0px]'} bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-200 text-sm transition fixed z-50 top-0 left-0 rounded-r-2xl
         "
+	data-state={$showSidebar}
 >
 	<div
-		class="py-2.5 my-auto flex flex-col justify-between h-screen max-h-[100dvh] w-[260px] {show
+		class="py-2.5 my-auto flex flex-col justify-between h-screen max-h-[100dvh] w-[260px] {$showSidebar
 			? ''
 			: 'invisible'}"
 	>
 		<div class="px-2 flex justify-center space-x-2">
 			<a
 				id="sidebar-new-chat-button"
-				class="flex-grow flex justify-between rounded-xl px-3.5 py-2 hover:bg-gray-900 transition"
+				class="flex-grow flex justify-between rounded-xl px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
 				href="/"
 				on:click={async () => {
+					selectedChatId = null;
+
 					await goto('/');
 					const newChatButton = document.getElementById('new-chat-button');
 					setTimeout(() => {
@@ -119,12 +193,12 @@
 					<div class="self-center mr-1.5">
 						<img
 							src="{WEBUI_BASE_URL}/static/favicon.png"
-							class=" w-7 -translate-x-1.5 rounded-full"
+							class=" size-6 -translate-x-1.5 rounded-full"
 							alt="logo"
 						/>
 					</div>
 
-					<div class=" self-center font-medium text-sm">New Chat</div>
+					<div class=" self-center font-medium text-sm">{$i18n.t('New Chat')}</div>
 				</div>
 
 				<div class="self-center">
@@ -148,15 +222,19 @@
 		{#if $user?.role === 'admin'}
 			<div class="px-2 flex justify-center mt-0.5">
 				<a
-					class="flex-grow flex space-x-3 rounded-xl px-3.5 py-2 hover:bg-gray-900 transition"
+					class="flex-grow flex space-x-3 rounded-xl px-3.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
 					href="/modelfiles"
+					on:click={() => {
+						selectedChatId = null;
+						chatId.set('');
+					}}
 				>
 					<div class="self-center">
 						<svg
 							xmlns="http://www.w3.org/2000/svg"
 							fill="none"
 							viewBox="0 0 24 24"
-							stroke-width="1.5"
+							stroke-width="2"
 							stroke="currentColor"
 							class="w-4 h-4"
 						>
@@ -169,22 +247,26 @@
 					</div>
 
 					<div class="flex self-center">
-						<div class=" self-center font-medium text-sm">Modelfiles</div>
+						<div class=" self-center font-medium text-sm">{$i18n.t('Modelfiles')}</div>
 					</div>
 				</a>
 			</div>
 
 			<div class="px-2 flex justify-center">
 				<a
-					class="flex-grow flex space-x-3 rounded-xl px-3.5 py-2 hover:bg-gray-900 transition"
+					class="flex-grow flex space-x-3 rounded-xl px-3.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
 					href="/prompts"
+					on:click={() => {
+						selectedChatId = null;
+						chatId.set('');
+					}}
 				>
 					<div class="self-center">
 						<svg
 							xmlns="http://www.w3.org/2000/svg"
 							fill="none"
 							viewBox="0 0 24 24"
-							stroke-width="1.5"
+							stroke-width="2"
 							stroke="currentColor"
 							class="w-4 h-4"
 						>
@@ -197,22 +279,26 @@
 					</div>
 
 					<div class="flex self-center">
-						<div class=" self-center font-medium text-sm">Prompts</div>
+						<div class=" self-center font-medium text-sm">{$i18n.t('Prompts')}</div>
 					</div>
 				</a>
 			</div>
 
 			<div class="px-2 flex justify-center mb-1">
 				<a
-					class="flex-grow flex space-x-3 rounded-xl px-3.5 py-2 hover:bg-gray-900 transition"
+					class="flex-grow flex space-x-3 rounded-xl px-3.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
 					href="/documents"
+					on:click={() => {
+						selectedChatId = null;
+						chatId.set('');
+					}}
 				>
 					<div class="self-center">
 						<svg
 							xmlns="http://www.w3.org/2000/svg"
 							fill="none"
 							viewBox="0 0 24 24"
-							stroke-width="1.5"
+							stroke-width="2"
 							stroke="currentColor"
 							class="w-4 h-4"
 						>
@@ -225,7 +311,7 @@
 					</div>
 
 					<div class="flex self-center">
-						<div class=" self-center font-medium text-sm">Documents</div>
+						<div class=" self-center font-medium text-sm">{$i18n.t('Documents')}</div>
 					</div>
 				</a>
 			</div>
@@ -233,19 +319,21 @@
 
 		<div class="relative flex flex-col flex-1 overflow-y-auto">
 			{#if !($settings.saveChatHistory ?? true)}
-				<div class="absolute z-40 w-full h-full bg-black/90 flex justify-center">
+				<div class="absolute z-40 w-full h-full bg-gray-50/90 dark:bg-black/90 flex justify-center">
 					<div class=" text-left px-5 py-2">
-						<div class=" font-medium">Chat History is off for this browser.</div>
+						<div class=" font-medium">{$i18n.t('Chat History is off for this browser.')}</div>
 						<div class="text-xs mt-2">
-							When history is turned off, new chats on this browser won't appear in your history on
-							any of your devices. <span class=" font-semibold"
-								>This setting does not sync across browsers or devices.</span
+							{$i18n.t(
+								"When history is turned off, new chats on this browser won't appear in your history on any of your devices."
+							)}
+							<span class=" font-semibold"
+								>{$i18n.t('This setting does not sync across browsers or devices.')}</span
 							>
 						</div>
 
 						<div class="mt-3">
 							<button
-								class="flex justify-center items-center space-x-1.5 px-3 py-2.5 rounded-lg text-xs bg-gray-200 hover:bg-gray-300 transition text-gray-800 font-medium w-full"
+								class="flex justify-center items-center space-x-1.5 px-3 py-2.5 rounded-lg text-xs bg-gray-100 hover:bg-gray-200 transition text-gray-800 font-medium w-full"
 								type="button"
 								on:click={() => {
 									saveSettings({
@@ -266,7 +354,7 @@
 									/>
 								</svg>
 
-								<div>Enable Chat History</div>
+								<div>{$i18n.t('Enable Chat History')}</div>
 							</button>
 						</div>
 					</div>
@@ -275,7 +363,7 @@
 
 			<div class="px-2 mt-1 mb-2 flex justify-center space-x-2">
 				<div class="flex w-full" id="chat-search">
-					<div class="self-center pl-3 py-2 rounded-l-xl bg-gray-950">
+					<div class="self-center pl-3 py-2 rounded-l-xl bg-white dark:bg-gray-950">
 						<svg
 							xmlns="http://www.w3.org/2000/svg"
 							viewBox="0 0 20 20"
@@ -291,37 +379,20 @@
 					</div>
 
 					<input
-						class="w-full rounded-r-xl py-1.5 pl-2.5 pr-4 text-sm text-gray-300 bg-gray-950 outline-none"
-						placeholder="Search"
+						class="w-full rounded-r-xl py-1.5 pl-2.5 pr-4 text-sm dark:text-gray-300 dark:bg-gray-950 outline-none"
+						placeholder={$i18n.t('Search')}
 						bind:value={search}
 						on:focus={() => {
 							enrichChatsWithContent($chats);
 						}}
 					/>
-
-					<!-- <div class="self-center pr-3 py-2  bg-gray-900">
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							fill="none"
-							viewBox="0 0 24 24"
-							stroke-width="1.5"
-							stroke="currentColor"
-							class="w-4 h-4"
-						>
-							<path
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								d="M12 3c2.755 0 5.455.232 8.083.678.533.09.917.556.917 1.096v1.044a2.25 2.25 0 01-.659 1.591l-5.432 5.432a2.25 2.25 0 00-.659 1.591v2.927a2.25 2.25 0 01-1.244 2.013L9.75 21v-6.568a2.25 2.25 0 00-.659-1.591L3.659 7.409A2.25 2.25 0 013 5.818V4.774c0-.54.384-1.006.917-1.096A48.32 48.32 0 0112 3z"
-							/>
-						</svg>
-					</div> -->
 				</div>
 			</div>
 
 			{#if $tags.length > 0}
 				<div class="px-2.5 mt-0.5 mb-2 flex gap-1 flex-wrap">
 					<button
-						class="px-2.5 text-xs font-medium bg-gray-900 hover:bg-gray-800 transition rounded-full"
+						class="px-2.5 text-xs font-medium bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-800 transition rounded-full"
 						on:click={async () => {
 							await chats.set(await getChatList(localStorage.token));
 						}}
@@ -330,7 +401,7 @@
 					</button>
 					{#each $tags as tag}
 						<button
-							class="px-2.5 text-xs font-medium bg-gray-900 hover:bg-gray-800 transition rounded-full"
+							class="px-2.5 text-xs font-medium bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-800 transition rounded-full"
 							on:click={async () => {
 								let chatIds = await getChatListByTagName(localStorage.token, tag.name);
 								if (chatIds.length === 0) {
@@ -346,7 +417,7 @@
 				</div>
 			{/if}
 
-			<div class="pl-2 my-2 flex-1 flex flex-col space-y-1 overflow-y-auto">
+			<div class="pl-2 my-2 flex-1 flex flex-col space-y-1 overflow-y-auto scrollbar-none">
 				{#each $chats.filter((chat) => {
 					if (search === '') {
 						return true;
@@ -366,180 +437,212 @@
 						return title.includes(query) || contentMatches;
 					}
 				}) as chat, i}
-					<div class=" w-full pr-2 relative">
+					<div class=" w-full pr-2 relative group">
 						{#if chatTitleEditId === chat.id}
 							<div
-								class=" w-full flex justify-between rounded-xl px-3 py-2 hover:bg-gray-900 {chat.id ===
-								$chatId
-									? 'bg-gray-900'
-									: ''} transition whitespace-nowrap text-ellipsis"
+								class=" w-full flex justify-between rounded-xl px-3 py-2 {chat.id === $chatId ||
+								chat.id === chatTitleEditId ||
+								chat.id === chatDeleteId
+									? 'bg-gray-200 dark:bg-gray-900'
+									: chat.id === selectedChatId
+									? 'bg-gray-100 dark:bg-gray-950'
+									: 'group-hover:bg-gray-100 dark:group-hover:bg-gray-950'}  whitespace-nowrap text-ellipsis"
 							>
 								<input bind:value={chatTitle} class=" bg-transparent w-full outline-none mr-10" />
 							</div>
 						{:else}
 							<a
-								class=" w-full flex justify-between rounded-xl px-3 py-2 hover:bg-gray-900 {chat.id ===
-								$chatId
-									? 'bg-gray-900'
-									: ''} transition whitespace-nowrap text-ellipsis"
+								class=" w-full flex justify-between rounded-xl px-3 py-2 {chat.id === $chatId ||
+								chat.id === chatTitleEditId ||
+								chat.id === chatDeleteId
+									? 'bg-gray-200 dark:bg-gray-900'
+									: chat.id === selectedChatId
+									? 'bg-gray-100 dark:bg-gray-950'
+									: ' group-hover:bg-gray-100 dark:group-hover:bg-gray-950'}  whitespace-nowrap text-ellipsis"
 								href="/c/{chat.id}"
 								on:click={() => {
+									selectedChatId = chat.id;
 									if (window.innerWidth < 1024) {
-										show = false;
+										showSidebar.set(false);
 									}
 								}}
+								draggable="false"
 							>
 								<div class=" flex self-center flex-1 w-full">
-									<div
-										class=" text-left self-center overflow-hidden {chat.id === $chatId
-											? 'w-[160px]'
-											: 'w-full'} "
-									>
+									<div class=" text-left self-center overflow-hidden w-full h-[20px]">
 										{chat.title}
 									</div>
 								</div>
 							</a>
 						{/if}
 
-						{#if chat.id === $chatId}
-							<div class=" absolute right-[22px] top-[10px]">
-								{#if chatTitleEditId === chat.id}
-									<div class="flex self-center space-x-1.5">
+						<div
+							class="
+
+							{chat.id === $chatId || chat.id === chatTitleEditId || chat.id === chatDeleteId
+								? 'from-gray-200 dark:from-gray-900'
+								: chat.id === selectedChatId
+								? 'from-gray-100 dark:from-gray-950'
+								: 'invisible group-hover:visible from-gray-100 dark:from-gray-950'}
+								absolute right-[10px] top-[10px] pr-2 pl-5 bg-gradient-to-l from-80%
+
+								  to-transparent"
+						>
+							{#if chatTitleEditId === chat.id}
+								<div class="flex self-center space-x-1.5 z-10">
+									<button
+										class=" self-center dark:hover:text-white transition"
+										on:click={() => {
+											editChatTitle(chat.id, chatTitle);
+											chatTitleEditId = null;
+											chatTitle = '';
+										}}
+									>
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											viewBox="0 0 20 20"
+											fill="currentColor"
+											class="w-4 h-4"
+										>
+											<path
+												fill-rule="evenodd"
+												d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z"
+												clip-rule="evenodd"
+											/>
+										</svg>
+									</button>
+									<button
+										class=" self-center dark:hover:text-white transition"
+										on:click={() => {
+											chatTitleEditId = null;
+											chatTitle = '';
+										}}
+									>
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											viewBox="0 0 20 20"
+											fill="currentColor"
+											class="w-4 h-4"
+										>
+											<path
+												d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"
+											/>
+										</svg>
+									</button>
+								</div>
+							{:else if chatDeleteId === chat.id}
+								<div class="flex self-center space-x-1.5 z-10">
+									<button
+										class=" self-center dark:hover:text-white transition"
+										on:click={() => {
+											deleteChat(chat.id);
+										}}
+									>
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											viewBox="0 0 20 20"
+											fill="currentColor"
+											class="w-4 h-4"
+										>
+											<path
+												fill-rule="evenodd"
+												d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z"
+												clip-rule="evenodd"
+											/>
+										</svg>
+									</button>
+									<button
+										class=" self-center dark:hover:text-white transition"
+										on:click={() => {
+											chatDeleteId = null;
+										}}
+									>
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											viewBox="0 0 20 20"
+											fill="currentColor"
+											class="w-4 h-4"
+										>
+											<path
+												d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"
+											/>
+										</svg>
+									</button>
+								</div>
+							{:else}
+								<div class="flex self-center space-x-1 z-10">
+									<ChatMenu
+										chatId={chat.id}
+										shareHandler={() => {
+											shareChatId = selectedChatId;
+											showShareChatModal = true;
+										}}
+										renameHandler={() => {
+											chatTitle = chat.title;
+											chatTitleEditId = chat.id;
+										}}
+										deleteHandler={() => {
+											chatDeleteId = chat.id;
+										}}
+										onClose={() => {
+											selectedChatId = null;
+										}}
+									>
 										<button
-											class=" self-center hover:text-white transition"
+											aria-label="Chat Menu"
+											class=" self-center dark:hover:text-white transition"
 											on:click={() => {
-												editChatTitle(chat.id, chatTitle);
-												chatTitleEditId = null;
-												chatTitle = '';
+												selectedChatId = chat.id;
 											}}
 										>
 											<svg
 												xmlns="http://www.w3.org/2000/svg"
-												viewBox="0 0 20 20"
+												viewBox="0 0 16 16"
 												fill="currentColor"
 												class="w-4 h-4"
 											>
 												<path
-													fill-rule="evenodd"
-													d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z"
-													clip-rule="evenodd"
+													d="M2 8a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0ZM6.5 8a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0ZM12.5 6.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Z"
 												/>
 											</svg>
 										</button>
+									</ChatMenu>
+
+									<Tooltip content={$i18n.t('Archive')}>
 										<button
-											class=" self-center hover:text-white transition"
+											aria-label="Archive"
+											class=" self-center dark:hover:text-white transition"
 											on:click={() => {
-												chatTitleEditId = null;
-												chatTitle = '';
+												archiveChatHandler(chat.id);
 											}}
 										>
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												viewBox="0 0 20 20"
-												fill="currentColor"
-												class="w-4 h-4"
-											>
-												<path
-													d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"
-												/>
-											</svg>
+											<ArchiveBox />
 										</button>
-									</div>
-								{:else if chatDeleteId === chat.id}
-									<div class="flex self-center space-x-1.5">
-										<button
-											class=" self-center hover:text-white transition"
-											on:click={() => {
-												deleteChat(chat.id);
-											}}
-										>
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												viewBox="0 0 20 20"
-												fill="currentColor"
-												class="w-4 h-4"
-											>
-												<path
-													fill-rule="evenodd"
-													d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z"
-													clip-rule="evenodd"
-												/>
-											</svg>
-										</button>
-										<button
-											class=" self-center hover:text-white transition"
-											on:click={() => {
-												chatDeleteId = null;
-											}}
-										>
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												viewBox="0 0 20 20"
-												fill="currentColor"
-												class="w-4 h-4"
-											>
-												<path
-													d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"
-												/>
-											</svg>
-										</button>
-									</div>
-								{:else}
-									<div class="flex self-center space-x-1.5">
+									</Tooltip>
+
+									{#if chat.id === $chatId}
 										<button
 											id="delete-chat-button"
-											class=" hidden"
-											on:click={() => {
-												deleteChat(chat.id);
-											}}
-										/>
-										<button
-											class=" self-center hover:text-white transition"
-											on:click={() => {
-												chatTitle = chat.title;
-												chatTitleEditId = chat.id;
-											}}
-										>
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												fill="none"
-												viewBox="0 0 24 24"
-												stroke-width="1.5"
-												stroke="currentColor"
-												class="w-4 h-4"
-											>
-												<path
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125"
-												/>
-											</svg>
-										</button>
-										<button
-											class=" self-center hover:text-white transition"
+											class="hidden"
 											on:click={() => {
 												chatDeleteId = chat.id;
 											}}
 										>
 											<svg
 												xmlns="http://www.w3.org/2000/svg"
-												fill="none"
-												viewBox="0 0 24 24"
-												stroke-width="1.5"
-												stroke="currentColor"
+												viewBox="0 0 16 16"
+												fill="currentColor"
 												class="w-4 h-4"
 											>
 												<path
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"
+													d="M2 8a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0ZM6.5 8a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0ZM12.5 6.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Z"
 												/>
 											</svg>
 										</button>
-									</div>
-								{/if}
-							</div>
-						{/if}
+									{/if}
+								</div>
+							{/if}
+						</div>
 					</div>
 				{/each}
 			</div>
@@ -551,7 +654,7 @@
 			<div class="flex flex-col">
 				{#if $user !== undefined}
 					<button
-						class=" flex rounded-xl py-3 px-3.5 w-full hover:bg-gray-900 transition"
+						class=" flex rounded-xl py-3 px-3.5 w-full hover:bg-gray-100 dark:hover:bg-gray-900 transition"
 						on:click={() => {
 							showDropdown = !showDropdown;
 						}}
@@ -569,13 +672,13 @@
 					{#if showDropdown}
 						<div
 							id="dropdownDots"
-							class="absolute z-40 bottom-[70px] 4.5rem rounded-xl shadow w-[240px] bg-gray-900"
-							in:slide={{ duration: 150 }}
+							class="absolute z-40 bottom-[70px] rounded-lg shadow w-[240px] bg-white dark:bg-gray-900"
+							transition:fade|slide={{ duration: 100 }}
 						>
-							<div class="py-2 w-full">
+							<div class="p-1 py-2 w-full">
 								{#if $user.role === 'admin'}
 									<button
-										class="flex py-2.5 px-3.5 w-full hover:bg-gray-800 transition"
+										class="flex rounded-md py-2.5 px-3.5 w-full hover:bg-gray-100 dark:hover:bg-gray-800 transition"
 										on:click={() => {
 											goto('/admin');
 											showDropdown = false;
@@ -597,11 +700,11 @@
 												/>
 											</svg>
 										</div>
-										<div class=" self-center font-medium">Admin Panel</div>
+										<div class=" self-center font-medium">{$i18n.t('Admin Panel')}</div>
 									</button>
 
 									<button
-										class="flex py-2.5 px-3.5 w-full hover:bg-gray-800 transition"
+										class="flex rounded-md py-2.5 px-3.5 w-full hover:bg-gray-100 dark:hover:bg-gray-800 transition"
 										on:click={() => {
 											goto('/playground');
 											showDropdown = false;
@@ -623,12 +726,25 @@
 												/>
 											</svg>
 										</div>
-										<div class=" self-center font-medium">Playground</div>
+										<div class=" self-center font-medium">{$i18n.t('Playground')}</div>
 									</button>
 								{/if}
 
 								<button
-									class="flex py-2.5 px-3.5 w-full hover:bg-gray-800 transition"
+									class="flex rounded-md py-2.5 px-3.5 w-full hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+									on:click={() => {
+										showArchivedChatsModal = true;
+										showDropdown = false;
+									}}
+								>
+									<div class=" self-center mr-3">
+										<ArchiveBox className="size-5" strokeWidth="1.5" />
+									</div>
+									<div class=" self-center font-medium">{$i18n.t('Archived Chats')}</div>
+								</button>
+
+								<button
+									class="flex rounded-md py-2.5 px-3.5 w-full hover:bg-gray-100 dark:hover:bg-gray-800 transition"
 									on:click={async () => {
 										await showSettings.set(true);
 										showDropdown = false;
@@ -655,15 +771,15 @@
 											/>
 										</svg>
 									</div>
-									<div class=" self-center font-medium">Settings</div>
+									<div class=" self-center font-medium">{$i18n.t('Settings')}</div>
 								</button>
 							</div>
 
-							<hr class=" border-gray-700 m-0 p-0" />
+							<hr class=" dark:border-gray-800 m-0 p-0" />
 
-							<div class="py-2 w-full">
+							<div class="p-1 py-2 w-full">
 								<button
-									class="flex py-2.5 px-3.5 w-full hover:bg-gray-800 transition"
+									class="flex rounded-md py-2.5 px-3.5 w-full hover:bg-gray-100 dark:hover:bg-gray-800 transition"
 									on:click={() => {
 										localStorage.removeItem('token');
 										location.href = '/auth';
@@ -689,7 +805,7 @@
 											/>
 										</svg>
 									</div>
-									<div class=" self-center font-medium">Sign Out</div>
+									<div class=" self-center font-medium">{$i18n.t('Sign Out')}</div>
 								</button>
 							</div>
 						</div>
@@ -700,18 +816,23 @@
 	</div>
 
 	<div
-		class="fixed left-0 top-[50dvh] z-40 -translate-y-1/2 transition-transform translate-x-[255px] md:translate-x-[260px] rotate-0"
+		id="sidebar-handle"
+		class="fixed left-0 top-[50dvh] -translate-y-1/2 transition-transform translate-x-[255px] md:translate-x-[260px] rotate-0"
 	>
-		<Tooltip placement="right" content={`${show ? 'Close' : 'Open'} sidebar`} touch={false}>
+		<Tooltip
+			placement="right"
+			content={`${$showSidebar ? $i18n.t('Close') : $i18n.t('Open')} ${$i18n.t('sidebar')}`}
+			touch={false}
+		>
 			<button
 				id="sidebar-toggle-button"
 				class=" group"
 				on:click={() => {
-					show = !show;
+					showSidebar.set(!$showSidebar);
 				}}
 				><span class="" data-state="closed"
 					><div
-						class="flex h-[72px] w-8 items-center justify-center opacity-20 group-hover:opacity-100 transition"
+						class="flex h-[72px] w-8 items-center justify-center opacity-50 group-hover:opacity-100 transition"
 					>
 						<div class="flex h-6 w-6 flex-col items-center">
 							<div
@@ -731,3 +852,14 @@
 		</Tooltip>
 	</div>
 </div>
+
+<style>
+	.scrollbar-none:active::-webkit-scrollbar-thumb,
+	.scrollbar-none:focus::-webkit-scrollbar-thumb,
+	.scrollbar-none:hover::-webkit-scrollbar-thumb {
+		visibility: visible;
+	}
+	.scrollbar-none::-webkit-scrollbar-thumb {
+		visibility: hidden;
+	}
+</style>

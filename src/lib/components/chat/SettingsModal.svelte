@@ -1,10 +1,9 @@
 <script lang="ts">
+	import { getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { models, settings, user } from '$lib/stores';
 
-	import { getOllamaModels } from '$lib/apis/ollama';
-	import { getOpenAIModels } from '$lib/apis/openai';
-	import { getLiteLLMModels } from '$lib/apis/litellm';
+	import { getModels as _getModels } from '$lib/utils';
 
 	import Modal from '../common/Modal.svelte';
 	import Account from './Settings/Account.svelte';
@@ -17,6 +16,8 @@
 	import Connections from './Settings/Connections.svelte';
 	import Images from './Settings/Images.svelte';
 
+	const i18n = getContext('i18n');
+
 	export let show = false;
 
 	const saveSettings = async (updated) => {
@@ -26,39 +27,17 @@
 		localStorage.setItem('settings', JSON.stringify($settings));
 	};
 
-	let selectedTab = 'general';
-
 	const getModels = async () => {
-		let models = await Promise.all([
-			await getOllamaModels(localStorage.token).catch((error) => {
-				console.log(error);
-				return null;
-			}),
-			await getOpenAIModels(localStorage.token).catch((error) => {
-				console.log(error);
-				return null;
-			}),
-			await getLiteLLMModels(localStorage.token).catch((error) => {
-				console.log(error);
-				return null;
-			})
-		]);
-
-		models = models
-			.filter((models) => models)
-			.reduce((a, e, i, arr) => a.concat(e, ...(i < arr.length - 1 ? [{ name: 'hr' }] : [])), []);
-
-		// models.push(...(ollamaModels ? [{ name: 'hr' }, ...ollamaModels] : []));
-		// models.push(...(openAIModels ? [{ name: 'hr' }, ...openAIModels] : []));
-		// models.push(...(liteLLMModels ? [{ name: 'hr' }, ...liteLLMModels] : []));
-		return models;
+		return await _getModels(localStorage.token);
 	};
+
+	let selectedTab = 'general';
 </script>
 
 <Modal bind:show>
-	<div>
-		<div class=" flex justify-between dark:text-gray-300 px-5 py-4">
-			<div class=" text-lg font-medium self-center">Settings</div>
+	<div class="text-gray-700 dark:text-gray-100">
+		<div class=" flex justify-between dark:text-gray-300 px-5 pt-4 pb-1">
+			<div class=" text-lg font-medium self-center">{$i18n.t('Settings')}</div>
 			<button
 				class="self-center"
 				on:click={() => {
@@ -77,7 +56,6 @@
 				</svg>
 			</button>
 		</div>
-		<hr class=" dark:border-gray-800" />
 
 		<div class="flex flex-col md:flex-row w-full p-4 md:space-x-4">
 			<div
@@ -106,7 +84,7 @@
 							/>
 						</svg>
 					</div>
-					<div class=" self-center">General</div>
+					<div class=" self-center">{$i18n.t('General')}</div>
 				</button>
 
 				{#if $user?.role === 'admin'}
@@ -131,7 +109,7 @@
 								/>
 							</svg>
 						</div>
-						<div class=" self-center">Connections</div>
+						<div class=" self-center">{$i18n.t('Connections')}</div>
 					</button>
 
 					<button
@@ -157,7 +135,7 @@
 								/>
 							</svg>
 						</div>
-						<div class=" self-center">Models</div>
+						<div class=" self-center">{$i18n.t('Models')}</div>
 					</button>
 				{/if}
 
@@ -184,7 +162,7 @@
 							/>
 						</svg>
 					</div>
-					<div class=" self-center">Interface</div>
+					<div class=" self-center">{$i18n.t('Interface')}</div>
 				</button>
 
 				<button
@@ -211,7 +189,7 @@
 							/>
 						</svg>
 					</div>
-					<div class=" self-center">Audio</div>
+					<div class=" self-center">{$i18n.t('Audio')}</div>
 				</button>
 
 				{#if $user.role === 'admin'}
@@ -238,7 +216,7 @@
 								/>
 							</svg>
 						</div>
-						<div class=" self-center">Images</div>
+						<div class=" self-center">{$i18n.t('Images')}</div>
 					</button>
 				{/if}
 
@@ -265,7 +243,7 @@
 							/>
 						</svg>
 					</div>
-					<div class=" self-center">Chats</div>
+					<div class=" self-center">{$i18n.t('Chats')}</div>
 				</button>
 
 				<button
@@ -291,7 +269,7 @@
 							/>
 						</svg>
 					</div>
-					<div class=" self-center">Account</div>
+					<div class=" self-center">{$i18n.t('Account')}</div>
 				</button>
 
 				<button
@@ -317,16 +295,16 @@
 							/>
 						</svg>
 					</div>
-					<div class=" self-center">About</div>
+					<div class=" self-center">{$i18n.t('About')}</div>
 				</button>
 			</div>
-			<div class="flex-1 md:min-h-[380px]">
+			<div class="flex-1 md:min-h-[25rem]">
 				{#if selectedTab === 'general'}
 					<General
 						{getModels}
 						{saveSettings}
 						on:save={() => {
-							show = false;
+							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
 				{:else if selectedTab === 'models'}
@@ -335,28 +313,28 @@
 					<Connections
 						{getModels}
 						on:save={() => {
-							show = false;
+							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
 				{:else if selectedTab === 'interface'}
 					<Interface
 						{saveSettings}
 						on:save={() => {
-							show = false;
+							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
 				{:else if selectedTab === 'audio'}
 					<Audio
 						{saveSettings}
 						on:save={() => {
-							show = false;
+							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
 				{:else if selectedTab === 'images'}
 					<Images
 						{saveSettings}
 						on:save={() => {
-							show = false;
+							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
 				{:else if selectedTab === 'chats'}
@@ -364,7 +342,7 @@
 				{:else if selectedTab === 'account'}
 					<Account
 						saveHandler={() => {
-							show = false;
+							toast.success($i18n.t('Settings saved successfully!'));
 						}}
 					/>
 				{:else if selectedTab === 'about'}

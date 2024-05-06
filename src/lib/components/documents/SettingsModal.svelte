@@ -1,6 +1,9 @@
 <script>
+	import { getContext } from 'svelte';
 	import Modal from '../common/Modal.svelte';
 	import General from './Settings/General.svelte';
+
+	const i18n = getContext('i18n');
 
 	export let show = false;
 
@@ -9,8 +12,8 @@
 
 <Modal bind:show>
 	<div>
-		<div class=" flex justify-between dark:text-gray-300 px-5 py-4">
-			<div class=" text-lg font-medium self-center">Document Settings</div>
+		<div class=" flex justify-between dark:text-gray-300 px-5 pt-4">
+			<div class=" text-lg font-medium self-center">{$i18n.t('Document Settings')}</div>
 			<button
 				class="self-center"
 				on:click={() => {
@@ -29,7 +32,6 @@
 				</svg>
 			</button>
 		</div>
-		<hr class=" dark:border-gray-800" />
 
 		<div class="flex flex-col md:flex-row w-full p-4 md:space-x-4">
 			<div
@@ -58,7 +60,7 @@
 							/>
 						</svg>
 					</div>
-					<div class=" self-center">General</div>
+					<div class=" self-center">{$i18n.t('General')}</div>
 				</button>
 			</div>
 			<div class="flex-1 md:min-h-[380px]">

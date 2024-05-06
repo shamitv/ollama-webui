@@ -6,15 +6,23 @@
 	import auto_render from 'katex/dist/contrib/auto-render.mjs';
 	import 'katex/dist/katex.min.css';
 
+	import { fade } from 'svelte/transition';
 	import { createEventDispatcher } from 'svelte';
-	import { onMount, tick } from 'svelte';
+	import { onMount, tick, getContext } from 'svelte';
+
+	const i18n = getContext('i18n');
 
 	const dispatch = createEventDispatcher();
 
 	import { config, settings } from '$lib/stores';
-	import { synthesizeOpenAISpeech } from '$lib/apis/openai';
+	import { synthesizeOpenAISpeech } from '$lib/apis/audio';
 	import { imageGenerations } from '$lib/apis/images';
-	import { extractSentences } from '$lib/utils';
+	import {
+		approximateToHumanReadable,
+		extractSentences,
+		revertSanitizedResponseContent,
+		sanitizeResponseContent
+	} from '$lib/utils';
 
 	import Name from './Name.svelte';
 	import ProfileImage from './ProfileImage.svelte';
@@ -23,6 +31,7 @@
 	import Image from '$lib/components/common/Image.svelte';
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import RateComment from './RateComment.svelte';
 
 	export let modelfiles = [];
 	export let message;
@@ -30,6 +39,9 @@
 
 	export let isLastMessage = true;
 
+	export let readOnly = false;
+
+	export let updateChatMessages: Function;
 	export let confirmEditResponseMessage: Function;
 	export let showPreviousMessage: Function;
 	export let showNextMessage: Function;
@@ -51,7 +63,9 @@
 	let loadingSpeech = false;
 	let generatingImage = false;
 
-	$: tokens = marked.lexer(message.content);
+	let showRateComment = false;
+
+	$: tokens = marked.lexer(sanitizeResponseContent(message.content));
 
 	const renderer = new marked.Renderer();
 
@@ -109,30 +123,36 @@
                     eval_count: ${message.info.eval_count ?? 'N/A'}<br/>
                     eval_duration: ${
 											Math.round(((message.info.eval_duration ?? 0) / 1000000) * 100) / 100 ?? 'N/A'
-										}ms</span>`,
+										}ms<br/>
+                    approximate_total: ${approximateToHumanReadable(
+											message.info.total_duration
+										)}</span>`,
 				allowHTML: true
 			});
 		}
 	};
 
 	const renderLatex = () => {
-		let chatMessageElements = document.getElementsByClassName('chat-assistant');
-		// let lastChatMessageElement = chatMessageElements[chatMessageElements.length - 1];
+		let chatMessageElements = document
+			.getElementById(`message-${message.id}`)
+			?.getElementsByClassName('chat-assistant');
 
-		for (const element of chatMessageElements) {
-			auto_render(element, {
-				// customised options
-				// • auto-render specific keys, e.g.:
-				delimiters: [
-					{ left: '$$', right: '$$', display: false },
-					{ left: '$', right: '$', display: false },
-					{ left: '\\(', right: '\\)', display: false },
-					{ left: '\\[', right: '\\]', display: false },
-					{ left: '[ ', right: ' ]', display: false }
-				],
-				// • rendering keys, e.g.:
-				throwOnError: false
-			});
+		if (chatMessageElements) {
+			for (const element of chatMessageElements) {
+				auto_render(element, {
+					// customised options
+					// • auto-render specific keys, e.g.:
+					delimiters: [
+						{ left: '$$', right: '$$', display: false },
+						{ left: '$ ', right: ' $', display: false },
+						{ left: '\\(', right: '\\)', display: false },
+						{ left: '\\[', right: '\\]', display: false },
+						{ left: '[ ', right: ' ]', display: false }
+					],
+					// • rendering keys, e.g.:
+					throwOnError: false
+				});
+			}
 		}
 	};
 
@@ -159,10 +179,12 @@
 
 	const toggleSpeakMessage = async () => {
 		if (speaking) {
-			speechSynthesis.cancel();
+			try {
+				speechSynthesis.cancel();
 
-			sentencesAudio[speakingIdx].pause();
-			sentencesAudio[speakingIdx].currentTime = 0;
+				sentencesAudio[speakingIdx].pause();
+				sentencesAudio[speakingIdx].currentTime = 0;
+			} catch {}
 
 			speaking = null;
 			speakingIdx = null;
@@ -204,6 +226,10 @@
 						sentence
 					).catch((error) => {
 						toast.error(error);
+
+						speaking = null;
+						loadingSpeech = false;
+
 						return null;
 					});
 
@@ -213,7 +239,6 @@
 						const audio = new Audio(blobUrl);
 						sentencesAudio[idx] = audio;
 						loadingSpeech = false;
-
 						lastPlayedAudioPromise = lastPlayedAudioPromise.then(() => playAudio(idx));
 					}
 				}
@@ -276,13 +301,15 @@
 
 	const generateImage = async (message) => {
 		generatingImage = true;
-		const res = await imageGenerations(localStorage.token, message.content);
+		const res = await imageGenerations(localStorage.token, message.content).catch((error) => {
+			toast.error(error);
+		});
 		console.log(res);
 
 		if (res) {
-			message.files = res.images.map((image) => ({
+			message.files = res.map((image) => ({
 				type: 'image',
-				url: `data:image/png;base64,${image}`
+				url: `${image.url}`
 			}));
 
 			dispatch('save', message);
@@ -298,9 +325,10 @@
 </script>
 
 {#key message.id}
-	<div class=" flex w-full message-{message.id}">
+	<div class=" flex w-full message-{message.id}" id="message-{message.id}">
 		<ProfileImage
-			src={modelfiles[message.model]?.imageUrl ?? `${WEBUI_BASE_URL}/static/favicon.png`}
+			src={modelfiles[message.model]?.imageUrl ??
+				($i18n.language === 'dg-DG' ? `/doge.png` : `${WEBUI_BASE_URL}/static/favicon.png`)}
 		/>
 
 		<div class="w-full overflow-hidden">
@@ -313,7 +341,7 @@
 
 				{#if message.timestamp}
 					<span class=" invisible group-hover:visible text-gray-400 text-xs font-medium">
-						{dayjs(message.timestamp * 1000).format('DD/MM/YYYY HH:mm')}
+						{dayjs(message.timestamp * 1000).format($i18n.t('DD/MM/YYYY HH:mm'))}
 					</span>
 				{/if}
 			</Name>
@@ -352,12 +380,12 @@
 
 								<div class=" mt-2 mb-1 flex justify-center space-x-2 text-sm font-medium">
 									<button
-										class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-gray-100 transition rounded-lg"
+										class="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-gray-100 transition rounded-lg"
 										on:click={() => {
 											editMessageConfirmHandler();
 										}}
 									>
-										Save
+										{$i18n.t('Save')}
 									</button>
 
 									<button
@@ -366,7 +394,7 @@
 											cancelEditMessage();
 										}}
 									>
-										Cancel
+										{$i18n.t('Cancel')}
 									</button>
 								</div>
 							</div>
@@ -398,8 +426,10 @@
 								{:else}
 									{#each tokens as token}
 										{#if token.type === 'code'}
-											<!-- {token.text} -->
-											<CodeBlock lang={token.lang} code={token.text} />
+											<CodeBlock
+												lang={token.lang}
+												code={revertSanitizedResponseContent(token.text)}
+											/>
 										{:else}
 											{@html marked.parse(token.raw, {
 												...defaults,
@@ -464,33 +494,35 @@
 											</div>
 										{/if}
 
-										<Tooltip content="Edit" placement="bottom">
-											<button
-												class="{isLastMessage
-													? 'visible'
-													: 'invisible group-hover:visible'} p-1 rounded dark:hover:text-white hover:text-black transition"
-												on:click={() => {
-													editMessageHandler();
-												}}
-											>
-												<svg
-													xmlns="http://www.w3.org/2000/svg"
-													fill="none"
-													viewBox="0 0 24 24"
-													stroke-width="1.5"
-													stroke="currentColor"
-													class="w-4 h-4"
+										{#if !readOnly}
+											<Tooltip content={$i18n.t('Edit')} placement="bottom">
+												<button
+													class="{isLastMessage
+														? 'visible'
+														: 'invisible group-hover:visible'} p-1 rounded dark:hover:text-white hover:text-black transition"
+													on:click={() => {
+														editMessageHandler();
+													}}
 												>
-													<path
-														stroke-linecap="round"
-														stroke-linejoin="round"
-														d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125"
-													/>
-												</svg>
-											</button>
-										</Tooltip>
+													<svg
+														xmlns="http://www.w3.org/2000/svg"
+														fill="none"
+														viewBox="0 0 24 24"
+														stroke-width="2"
+														stroke="currentColor"
+														class="w-4 h-4"
+													>
+														<path
+															stroke-linecap="round"
+															stroke-linejoin="round"
+															d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125"
+														/>
+													</svg>
+												</button>
+											</Tooltip>
+										{/if}
 
-										<Tooltip content="Copy" placement="bottom">
+										<Tooltip content={$i18n.t('Copy')} placement="bottom">
 											<button
 												class="{isLastMessage
 													? 'visible'
@@ -503,7 +535,7 @@
 													xmlns="http://www.w3.org/2000/svg"
 													fill="none"
 													viewBox="0 0 24 24"
-													stroke-width="1.5"
+													stroke-width="2"
 													stroke="currentColor"
 													class="w-4 h-4"
 												>
@@ -516,61 +548,78 @@
 											</button>
 										</Tooltip>
 
-										<Tooltip content="Good Response" placement="bottom">
-											<button
-												class="{isLastMessage
-													? 'visible'
-													: 'invisible group-hover:visible'} p-1 rounded {message.rating === 1
-													? 'bg-gray-100 dark:bg-gray-800'
-													: ''} dark:hover:text-white hover:text-black transition"
-												on:click={() => {
-													rateMessage(message.id, 1);
-												}}
-											>
-												<svg
-													stroke="currentColor"
-													fill="none"
-													stroke-width="2"
-													viewBox="0 0 24 24"
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													class="w-4 h-4"
-													xmlns="http://www.w3.org/2000/svg"
-													><path
-														d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"
-													/></svg
-												>
-											</button>
-										</Tooltip>
+										{#if !readOnly}
+											<Tooltip content={$i18n.t('Good Response')} placement="bottom">
+												<button
+													class="{isLastMessage
+														? 'visible'
+														: 'invisible group-hover:visible'} p-1 rounded {message?.annotation
+														?.rating === 1
+														? 'bg-gray-100 dark:bg-gray-800'
+														: ''} dark:hover:text-white hover:text-black transition"
+													on:click={() => {
+														rateMessage(message.id, 1);
+														showRateComment = true;
 
-										<Tooltip content="Bad Response" placement="bottom">
-											<button
-												class="{isLastMessage
-													? 'visible'
-													: 'invisible group-hover:visible'} p-1 rounded {message.rating === -1
-													? 'bg-gray-100 dark:bg-gray-800'
-													: ''} dark:hover:text-white hover:text-black transition"
-												on:click={() => {
-													rateMessage(message.id, -1);
-												}}
-											>
-												<svg
-													stroke="currentColor"
-													fill="none"
-													stroke-width="2"
-													viewBox="0 0 24 24"
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													class="w-4 h-4"
-													xmlns="http://www.w3.org/2000/svg"
-													><path
-														d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"
-													/></svg
+														window.setTimeout(() => {
+															document
+																.getElementById(`message-feedback-${message.id}`)
+																?.scrollIntoView();
+														}, 0);
+													}}
 												>
-											</button>
-										</Tooltip>
+													<svg
+														stroke="currentColor"
+														fill="none"
+														stroke-width="2"
+														viewBox="0 0 24 24"
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														class="w-4 h-4"
+														xmlns="http://www.w3.org/2000/svg"
+														><path
+															d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"
+														/></svg
+													>
+												</button>
+											</Tooltip>
 
-										<Tooltip content="Read Aloud" placement="bottom">
+											<Tooltip content={$i18n.t('Bad Response')} placement="bottom">
+												<button
+													class="{isLastMessage
+														? 'visible'
+														: 'invisible group-hover:visible'} p-1 rounded {message?.annotation
+														?.rating === -1
+														? 'bg-gray-100 dark:bg-gray-800'
+														: ''} dark:hover:text-white hover:text-black transition"
+													on:click={() => {
+														rateMessage(message.id, -1);
+														showRateComment = true;
+														window.setTimeout(() => {
+															document
+																.getElementById(`message-feedback-${message.id}`)
+																?.scrollIntoView();
+														}, 0);
+													}}
+												>
+													<svg
+														stroke="currentColor"
+														fill="none"
+														stroke-width="2"
+														viewBox="0 0 24 24"
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														class="w-4 h-4"
+														xmlns="http://www.w3.org/2000/svg"
+														><path
+															d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"
+														/></svg
+													>
+												</button>
+											</Tooltip>
+										{/if}
+
+										<Tooltip content={$i18n.t('Read Aloud')} placement="bottom">
 											<button
 												id="speak-button-{message.id}"
 												class="{isLastMessage
@@ -622,7 +671,7 @@
 														xmlns="http://www.w3.org/2000/svg"
 														fill="none"
 														viewBox="0 0 24 24"
-														stroke-width="1.5"
+														stroke-width="2"
 														stroke="currentColor"
 														class="w-4 h-4"
 													>
@@ -637,7 +686,7 @@
 														xmlns="http://www.w3.org/2000/svg"
 														fill="none"
 														viewBox="0 0 24 24"
-														stroke-width="1.5"
+														stroke-width="2"
 														stroke="currentColor"
 														class="w-4 h-4"
 													>
@@ -651,7 +700,7 @@
 											</button>
 										</Tooltip>
 
-										{#if $config.images}
+										{#if $config.images && !readOnly}
 											<Tooltip content="Generate Image" placement="bottom">
 												<button
 													class="{isLastMessage
@@ -703,7 +752,7 @@
 															xmlns="http://www.w3.org/2000/svg"
 															fill="none"
 															viewBox="0 0 24 24"
-															stroke-width="1.5"
+															stroke-width="2"
 															stroke="currentColor"
 															class="w-4 h-4"
 														>
@@ -719,7 +768,7 @@
 										{/if}
 
 										{#if message.info}
-											<Tooltip content="Generation Info" placement="bottom">
+											<Tooltip content={$i18n.t('Generation Info')} placement="bottom">
 												<button
 													class=" {isLastMessage
 														? 'visible'
@@ -733,7 +782,7 @@
 														xmlns="http://www.w3.org/2000/svg"
 														fill="none"
 														viewBox="0 0 24 24"
-														stroke-width="1.5"
+														stroke-width="2"
 														stroke="currentColor"
 														class="w-4 h-4"
 													>
@@ -747,8 +796,8 @@
 											</Tooltip>
 										{/if}
 
-										{#if isLastMessage}
-											<Tooltip content="Continue Response" placement="bottom">
+										{#if isLastMessage && !readOnly}
+											<Tooltip content={$i18n.t('Continue Response')} placement="bottom">
 												<button
 													type="button"
 													class="{isLastMessage
@@ -762,7 +811,7 @@
 														xmlns="http://www.w3.org/2000/svg"
 														fill="none"
 														viewBox="0 0 24 24"
-														stroke-width="1.5"
+														stroke-width="2"
 														stroke="currentColor"
 														class="w-4 h-4"
 													>
@@ -780,7 +829,7 @@
 												</button>
 											</Tooltip>
 
-											<Tooltip content="Regenerate" placement="bottom">
+											<Tooltip content={$i18n.t('Regenerate')} placement="bottom">
 												<button
 													type="button"
 													class="{isLastMessage
@@ -792,7 +841,7 @@
 														xmlns="http://www.w3.org/2000/svg"
 														fill="none"
 														viewBox="0 0 24 24"
-														stroke-width="1.5"
+														stroke-width="2"
 														stroke="currentColor"
 														class="w-4 h-4"
 													>
@@ -806,6 +855,17 @@
 											</Tooltip>
 										{/if}
 									</div>
+								{/if}
+
+								{#if showRateComment}
+									<RateComment
+										messageId={message.id}
+										bind:show={showRateComment}
+										bind:message
+										on:submit={() => {
+											updateChatMessages();
+										}}
+									/>
 								{/if}
 							</div>
 						{/if}

@@ -2,7 +2,7 @@
 	import { v4 as uuidv4 } from 'uuid';
 	import { toast } from 'svelte-sonner';
 
-	import { onMount, tick } from 'svelte';
+	import { onMount, tick, getContext } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 
@@ -15,11 +15,12 @@
 		chatId,
 		config,
 		WEBUI_NAME,
-		tags as _tags
+		tags as _tags,
+		showSidebar
 	} from '$lib/stores';
 	import { copyToClipboard, splitStream } from '$lib/utils';
 
-	import { generateChatCompletion, cancelChatCompletion, generateTitle } from '$lib/apis/ollama';
+	import { generateChatCompletion, cancelOllamaRequest } from '$lib/apis/ollama';
 	import {
 		addTagById,
 		createNewChat,
@@ -30,22 +31,29 @@
 		updateChatById
 	} from '$lib/apis/chats';
 	import { queryCollection, queryDoc } from '$lib/apis/rag';
-	import { generateOpenAIChatCompletion } from '$lib/apis/openai';
+	import { generateOpenAIChatCompletion, generateTitle } from '$lib/apis/openai';
 
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
 	import Messages from '$lib/components/chat/Messages.svelte';
 	import ModelSelector from '$lib/components/chat/ModelSelector.svelte';
 	import Navbar from '$lib/components/layout/Navbar.svelte';
 	import { RAGTemplate } from '$lib/utils/rag';
-	import { LITELLM_API_BASE_URL, OPENAI_API_BASE_URL } from '$lib/constants';
+	import { LITELLM_API_BASE_URL, OLLAMA_API_BASE_URL, OPENAI_API_BASE_URL } from '$lib/constants';
 	import { WEBUI_BASE_URL } from '$lib/constants';
+	import { createOpenAITextStream } from '$lib/apis/streaming';
+
+	const i18n = getContext('i18n');
+
 	let stopResponseFlag = false;
 	let autoScroll = true;
 	let processing = '';
 	let messagesContainerElement: HTMLDivElement;
 	let currentRequestId = null;
 
+	let showModelSelector = true;
+
 	let selectedModels = [''];
+	let atSelectedModel = '';
 
 	let selectedModelfile = null;
 	$: selectedModelfile =
@@ -101,7 +109,7 @@
 
 	const initNewChat = async () => {
 		if (currentRequestId !== null) {
-			await cancelChatCompletion(localStorage.token, currentRequestId);
+			await cancelOllamaRequest(localStorage.token, currentRequestId);
 			currentRequestId = null;
 		}
 		window.history.replaceState(history.state, '', `/`);
@@ -139,8 +147,11 @@
 		setTimeout(() => chatInput?.focus(), 0);
 	};
 
-	const scrollToBottom = () => {
-		messagesContainerElement.scrollTop = messagesContainerElement.scrollHeight;
+	const scrollToBottom = async () => {
+		await tick();
+		if (messagesContainerElement) {
+			messagesContainerElement.scrollTop = messagesContainerElement.scrollHeight;
+		}
 	};
 
 	//////////////////////////
@@ -155,7 +166,7 @@
 		);
 
 		if (selectedModels.includes('')) {
-			toast.error('Model not selected');
+			toast.error($i18n.t('Model not selected'));
 		} else if (messages.length != 0 && messages.at(-1).done != true) {
 			// Response not done
 			console.log('wait');
@@ -165,7 +176,9 @@
 		) {
 			// Upload not done
 			toast.error(
-				`Oops! Hold tight! Your files are still in the processing oven. We're cooking them up to perfection. Please be patient and we'll let you know once they're ready.`
+				$i18n.t(
+					`Oops! Hold tight! Your files are still in the processing oven. We're cooking them up to perfection. Please be patient and we'll let you know once they're ready.`
+				)
 			);
 		} else {
 			// Reset chat message textarea height
@@ -201,7 +214,7 @@
 				if ($settings.saveChatHistory ?? true) {
 					chat = await createNewChat(localStorage.token, {
 						id: $chatId,
-						title: 'New Chat',
+						title: $i18n.t('New Chat'),
 						models: selectedModels,
 						system: $settings.system ?? undefined,
 						options: {
@@ -232,55 +245,9 @@
 	const sendPrompt = async (prompt, parentId) => {
 		const _chatId = JSON.parse(JSON.stringify($chatId));
 
-		const docs = messages
-			.filter((message) => message?.files ?? null)
-			.map((message) =>
-				message.files.filter((item) => item.type === 'doc' || item.type === 'collection')
-			)
-			.flat(1);
-
-		console.log(docs);
-		if (docs.length > 0) {
-			processing = 'Reading';
-			const query = history.messages[parentId].content;
-
-			let relevantContexts = await Promise.all(
-				docs.map(async (doc) => {
-					if (doc.type === 'collection') {
-						return await queryCollection(localStorage.token, doc.collection_names, query).catch(
-							(error) => {
-								console.log(error);
-								return null;
-							}
-						);
-					} else {
-						return await queryDoc(localStorage.token, doc.collection_name, query).catch((error) => {
-							console.log(error);
-							return null;
-						});
-					}
-				})
-			);
-			relevantContexts = relevantContexts.filter((context) => context);
-
-			const contextString = relevantContexts.reduce((a, context, i, arr) => {
-				return `${a}${context.documents.join(' ')}\n`;
-			}, '');
-
-			console.log(contextString);
-
-			history.messages[parentId].raContent = await RAGTemplate(
-				localStorage.token,
-				contextString,
-				query
-			);
-			history.messages[parentId].contexts = relevantContexts;
-			await tick();
-			processing = '';
-		}
-
 		await Promise.all(
-			selectedModels.map(async (modelId) => {
+			(atSelectedModel !== '' ? [atSelectedModel.id] : selectedModels).map(async (modelId) => {
+				console.log('modelId', modelId);
 				const model = $models.filter((m) => m.id === modelId).at(0);
 
 				if (model) {
@@ -314,7 +281,7 @@
 						await sendPromptOllama(model, prompt, responseMessageId, _chatId);
 					}
 				} else {
-					toast.error(`Model ${modelId} not found`);
+					toast.error($i18n.t(`Model {{modelId}} not found`, { modelId }));
 				}
 			})
 		);
@@ -342,15 +309,25 @@
 			...messages
 		]
 			.filter((message) => message)
-			.map((message, idx, arr) => ({
-				role: message.role,
-				content: arr.length - 2 !== idx ? message.content : message?.raContent ?? message.content,
-				...(message.files && {
-					images: message.files
-						.filter((file) => file.type === 'image')
-						.map((file) => file.url.slice(file.url.indexOf(',') + 1))
-				})
-			}));
+			.map((message, idx, arr) => {
+				// Prepare the base message object
+				const baseMessage = {
+					role: message.role,
+					content: arr.length - 2 !== idx ? message.content : message?.raContent ?? message.content
+				};
+
+				// Extract and format image URLs if any exist
+				const imageUrls = message.files
+					?.filter((file) => file.type === 'image')
+					.map((file) => file.url.slice(file.url.indexOf(',') + 1));
+
+				// Add images array only if it contains elements
+				if (imageUrls && imageUrls.length > 0 && message.role === 'user') {
+					baseMessage.images = imageUrls;
+				}
+
+				return baseMessage;
+			});
 
 		let lastImageIndex = -1;
 
@@ -368,14 +345,28 @@
 			}
 		});
 
+		const docs = messages
+			.filter((message) => message?.files ?? null)
+			.map((message) =>
+				message.files.filter((item) => item.type === 'doc' || item.type === 'collection')
+			)
+			.flat(1);
+
 		const [res, controller] = await generateChatCompletion(localStorage.token, {
 			model: model,
 			messages: messagesBody,
 			options: {
-				...($settings.options ?? {})
+				...($settings.options ?? {}),
+				stop:
+					$settings?.options?.stop ?? undefined
+						? $settings.options.stop.map((str) =>
+								decodeURIComponent(JSON.parse('"' + str.replace(/\"/g, '\\"') + '"'))
+						  )
+						: undefined
 			},
 			format: $settings.requestFormat ?? undefined,
-			keep_alive: $settings.keepAlive ?? undefined
+			keep_alive: $settings.keepAlive ?? undefined,
+			docs: docs.length > 0 ? docs : undefined
 		});
 
 		if (res && res.ok) {
@@ -394,7 +385,7 @@
 
 					if (stopResponseFlag) {
 						controller.abort('User: Stop Response');
-						await cancelChatCompletion(localStorage.token, currentRequestId);
+						await cancelOllamaRequest(localStorage.token, currentRequestId);
 					}
 
 					currentRequestId = null;
@@ -508,12 +499,18 @@
 					responseMessage.content = error.error;
 				}
 			} else {
-				toast.error(`Uh-oh! There was an issue connecting to Ollama.`);
-				responseMessage.content = `Uh-oh! There was an issue connecting to Ollama.`;
+				toast.error(
+					$i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, { provider: 'Ollama' })
+				);
+				responseMessage.content = $i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
+					provider: 'Ollama'
+				});
 			}
 
 			responseMessage.error = true;
-			responseMessage.content = `Uh-oh! There was an issue connecting to Ollama.`;
+			responseMessage.content = $i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
+				provider: 'Ollama'
+			});
 			responseMessage.done = true;
 			messages = messages;
 		}
@@ -527,15 +524,26 @@
 
 		if (messages.length == 2 && messages.at(1).content !== '') {
 			window.history.replaceState(history.state, '', `/c/${_chatId}`);
-			await generateChatTitle(_chatId, userPrompt);
+			const _title = await generateChatTitle(userPrompt);
+			await setChatTitle(_chatId, _title);
 		}
 	};
 
 	const sendPromptOpenAI = async (model, userPrompt, responseMessageId, _chatId) => {
 		const responseMessage = history.messages[responseMessageId];
+
+		const docs = messages
+			.filter((message) => message?.files ?? null)
+			.map((message) =>
+				message.files.filter((item) => item.type === 'doc' || item.type === 'collection')
+			)
+			.flat(1);
+
+		console.log(docs);
+
 		scrollToBottom();
 
-		const res = await generateOpenAIChatCompletion(
+		const [res, controller] = await generateOpenAIChatCompletion(
 			localStorage.token,
 			{
 				model: model.id,
@@ -552,7 +560,8 @@
 					.filter((message) => message)
 					.map((message, idx, arr) => ({
 						role: message.role,
-						...(message.files?.filter((file) => file.type === 'image').length > 0 ?? false
+						...((message.files?.filter((file) => file.type === 'image').length > 0 ?? false) &&
+						message.role === 'user'
 							? {
 									content: [
 										{
@@ -578,54 +587,50 @@
 							  })
 					})),
 				seed: $settings?.options?.seed ?? undefined,
-				stop: $settings?.options?.stop ?? undefined,
+				stop:
+					$settings?.options?.stop ?? undefined
+						? $settings?.options?.stop.map((str) =>
+								decodeURIComponent(JSON.parse('"' + str.replace(/\"/g, '\\"') + '"'))
+						  )
+						: undefined,
 				temperature: $settings?.options?.temperature ?? undefined,
 				top_p: $settings?.options?.top_p ?? undefined,
 				num_ctx: $settings?.options?.num_ctx ?? undefined,
 				frequency_penalty: $settings?.options?.repeat_penalty ?? undefined,
-				max_tokens: $settings?.options?.num_predict ?? undefined
+				max_tokens: $settings?.options?.num_predict ?? undefined,
+				docs: docs.length > 0 ? docs : undefined
 			},
-			model.source === 'litellm' ? `${LITELLM_API_BASE_URL}/v1` : `${OPENAI_API_BASE_URL}`
+			model?.source?.toLowerCase() === 'litellm'
+				? `${LITELLM_API_BASE_URL}/v1`
+				: `${OPENAI_API_BASE_URL}`
 		);
 
-		if (res && res.ok) {
-			const reader = res.body
-				.pipeThrough(new TextDecoderStream())
-				.pipeThrough(splitStream('\n'))
-				.getReader();
+		// Wait until history/message have been updated
+		await tick();
 
-			while (true) {
-				const { value, done } = await reader.read();
+		scrollToBottom();
+
+		if (res && res.ok && res.body) {
+			const textStream = await createOpenAITextStream(res.body, $settings.splitLargeChunks);
+
+			for await (const update of textStream) {
+				const { value, done } = update;
 				if (done || stopResponseFlag || _chatId !== $chatId) {
 					responseMessage.done = true;
 					messages = messages;
+
+					if (stopResponseFlag) {
+						controller.abort('User: Stop Response');
+					}
+
 					break;
 				}
 
-				try {
-					let lines = value.split('\n');
-
-					for (const line of lines) {
-						if (line !== '') {
-							console.log(line);
-							if (line === 'data: [DONE]') {
-								responseMessage.done = true;
-								messages = messages;
-							} else {
-								let data = JSON.parse(line.replace(/^data: /, ''));
-								console.log(data);
-
-								if (responseMessage.content == '' && data.choices[0].delta.content == '\n') {
-									continue;
-								} else {
-									responseMessage.content += data.choices[0].delta.content ?? '';
-									messages = messages;
-								}
-							}
-						}
-					}
-				} catch (error) {
-					console.log(error);
+				if (responseMessage.content == '' && value == '\n') {
+					continue;
+				} else {
+					responseMessage.content += value;
+					messages = messages;
 				}
 
 				if ($settings.notificationEnabled && !document.hasFocus()) {
@@ -675,12 +680,20 @@
 					}
 				}
 			} else {
-				toast.error(`Uh-oh! There was an issue connecting to ${model}.`);
-				responseMessage.content = `Uh-oh! There was an issue connecting to ${model}.`;
+				toast.error(
+					$i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
+						provider: model.name ?? model.id
+					})
+				);
+				responseMessage.content = $i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
+					provider: model.name ?? model.id
+				});
 			}
 
 			responseMessage.error = true;
-			responseMessage.content = `Uh-oh! There was an issue connecting to ${model}.`;
+			responseMessage.content = $i18n.t(`Uh-oh! There was an issue connecting to {{provider}}.`, {
+				provider: model.name ?? model.id
+			});
 			responseMessage.done = true;
 			messages = messages;
 		}
@@ -694,7 +707,9 @@
 
 		if (messages.length == 2) {
 			window.history.replaceState(history.state, '', `/c/${_chatId}`);
-			await setChatTitle(_chatId, userPrompt);
+
+			const _title = await generateChatTitle(userPrompt);
+			await setChatTitle(_chatId, _title);
 		}
 	};
 
@@ -744,25 +759,50 @@
 					);
 			}
 		} else {
-			toast.error(`Model ${modelId} not found`);
+			toast.error($i18n.t(`Model {{modelId}} not found`, { modelId }));
 		}
 	};
 
-	const generateChatTitle = async (_chatId, userPrompt) => {
-		if ($settings.titleAutoGenerate ?? true) {
+	const generateChatTitle = async (userPrompt) => {
+		if ($settings?.title?.auto ?? true) {
+			const model = $models.find((model) => model.id === selectedModels[0]);
+
+			const titleModelId =
+				model?.external ?? false
+					? $settings?.title?.modelExternal ?? selectedModels[0]
+					: $settings?.title?.model ?? selectedModels[0];
+			const titleModel = $models.find((model) => model.id === titleModelId);
+
+			console.log(titleModel);
 			const title = await generateTitle(
 				localStorage.token,
-				$settings?.titleGenerationPrompt ??
-					"Create a concise, 3-5 word phrase as a header for the following query, strictly adhering to the 3-5 word limit and avoiding the use of the word 'title': {{prompt}}",
-				$settings?.titleAutoGenerateModel ?? selectedModels[0],
-				userPrompt
+				$settings?.title?.prompt ??
+					$i18n.t(
+						"Create a concise, 3-5 word phrase as a header for the following query, strictly adhering to the 3-5 word limit and avoiding the use of the word 'title':"
+					) + ' {{prompt}}',
+				titleModelId,
+				userPrompt,
+				titleModel?.external ?? false
+					? titleModel?.source?.toLowerCase() === 'litellm'
+						? `${LITELLM_API_BASE_URL}/v1`
+						: `${OPENAI_API_BASE_URL}`
+					: `${OLLAMA_API_BASE_URL}/v1`
 			);
 
-			if (title) {
-				await setChatTitle(_chatId, title);
-			}
+			return title;
 		} else {
-			await setChatTitle(_chatId, `${userPrompt}`);
+			return `${userPrompt}`;
+		}
+	};
+
+	const setChatTitle = async (_chatId, _title) => {
+		if (_chatId === $chatId) {
+			title = _title;
+		}
+
+		if ($settings.saveChatHistory ?? true) {
+			chat = await updateChatById(localStorage.token, _chatId, { title: _title });
+			await chats.set(await getChatList(localStorage.token));
 		}
 	};
 
@@ -793,17 +833,6 @@
 
 		_tags.set(await getAllChatTags(localStorage.token));
 	};
-
-	const setChatTitle = async (_chatId, _title) => {
-		if (_chatId === $chatId) {
-			title = _title;
-		}
-
-		if ($settings.saveChatHistory ?? true) {
-			chat = await updateChatById(localStorage.token, _chatId, { title: _title });
-			await chats.set(await getChatList(localStorage.token));
-		}
-	};
 </script>
 
 <svelte:head>
@@ -814,28 +843,31 @@
 	</title>
 </svelte:head>
 
-<div class="h-screen max-h-[100dvh] w-full flex flex-col">
-	<Navbar {title} shareEnabled={messages.length > 0} {initNewChat} {tags} {addTag} {deleteTag} />
+<div
+	class="min-h-screen max-h-screen {$showSidebar
+		? 'lg:max-w-[calc(100%-260px)]'
+		: ''} w-full max-w-full flex flex-col"
+>
+	<Navbar
+		{title}
+		bind:selectedModels
+		bind:showModelSelector
+		shareEnabled={messages.length > 0}
+		{chat}
+		{initNewChat}
+	/>
 	<div class="flex flex-col flex-auto">
 		<div
-			class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0"
+			class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full"
 			id="messages-container"
 			bind:this={messagesContainerElement}
 			on:scroll={(e) => {
 				autoScroll =
 					messagesContainerElement.scrollHeight - messagesContainerElement.scrollTop <=
-					messagesContainerElement.clientHeight + 50;
+					messagesContainerElement.clientHeight + 5;
 			}}
 		>
-			<div
-				class="{$settings?.fullScreenMode ?? null
-					? 'max-w-full'
-					: 'max-w-2xl md:px-0'} mx-auto w-full px-4"
-			>
-				<ModelSelector bind:selectedModels />
-			</div>
-
-			<div class=" h-full w-full flex flex-col py-8">
+			<div class=" h-full w-full flex flex-col pt-2 pb-4">
 				<Messages
 					chatId={$chatId}
 					{selectedModels}
@@ -844,22 +876,25 @@
 					bind:history
 					bind:messages
 					bind:autoScroll
+					bind:prompt
 					bottomPadding={files.length > 0}
+					suggestionPrompts={selectedModelfile?.suggestionPrompts ??
+						$config.default_prompt_suggestions}
 					{sendPrompt}
 					{continueGeneration}
 					{regenerateResponse}
 				/>
 			</div>
 		</div>
-
-		<MessageInput
-			bind:files
-			bind:prompt
-			bind:autoScroll
-			suggestionPrompts={selectedModelfile?.suggestionPrompts ?? $config.default_prompt_suggestions}
-			{messages}
-			{submitPrompt}
-			{stopResponse}
-		/>
 	</div>
 </div>
+
+<MessageInput
+	bind:files
+	bind:prompt
+	bind:autoScroll
+	bind:selectedModel={atSelectedModel}
+	{messages}
+	{submitPrompt}
+	{stopResponse}
+/>

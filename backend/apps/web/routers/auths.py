@@ -1,22 +1,25 @@
-from fastapi import Response, Request
-from fastapi import Depends, FastAPI, HTTPException, status
-from datetime import datetime, timedelta
-from typing import List, Union
+import logging
 
-from fastapi import APIRouter, status
+from fastapi import Request, UploadFile, File
+from fastapi import Depends, HTTPException, status
+
+from fastapi import APIRouter
 from pydantic import BaseModel
-import time
-import uuid
 import re
+import uuid
+import csv
+
 
 from apps.web.models.auths import (
     SigninForm,
     SignupForm,
+    AddUserForm,
     UpdateProfileForm,
     UpdatePasswordForm,
     UserResponse,
     SigninResponse,
     Auths,
+    ApiKey,
 )
 from apps.web.models.users import Users
 
@@ -25,9 +28,12 @@ from utils.utils import (
     get_current_user,
     get_admin_user,
     create_token,
+    create_api_key,
 )
 from utils.misc import parse_duration, validate_email_format
-from constants import ERROR_MESSAGES
+from utils.webhook import post_webhook
+from constants import ERROR_MESSAGES, WEBHOOK_MESSAGES
+from config import WEBUI_AUTH_TRUSTED_EMAIL_HEADER
 
 router = APIRouter()
 
@@ -78,6 +84,8 @@ async def update_profile(
 async def update_password(
     form_data: UpdatePasswordForm, session_user=Depends(get_current_user)
 ):
+    if WEBUI_AUTH_TRUSTED_EMAIL_HEADER:
+        raise HTTPException(400, detail=ERROR_MESSAGES.ACTION_PROHIBITED)
     if session_user:
         user = Auths.authenticate_user(session_user.email, form_data.password)
 
@@ -97,7 +105,22 @@ async def update_password(
 
 @router.post("/signin", response_model=SigninResponse)
 async def signin(request: Request, form_data: SigninForm):
-    user = Auths.authenticate_user(form_data.email.lower(), form_data.password)
+    if WEBUI_AUTH_TRUSTED_EMAIL_HEADER:
+        if WEBUI_AUTH_TRUSTED_EMAIL_HEADER not in request.headers:
+            raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_TRUSTED_HEADER)
+
+        trusted_email = request.headers[WEBUI_AUTH_TRUSTED_EMAIL_HEADER].lower()
+        if not Users.get_user_by_email(trusted_email.lower()):
+            await signup(
+                request,
+                SignupForm(
+                    email=trusted_email, password=str(uuid.uuid4()), name=trusted_email
+                ),
+            )
+        user = Auths.authenticate_user_by_trusted_header(trusted_email)
+    else:
+        user = Auths.authenticate_user(form_data.email.lower(), form_data.password)
+
     if user:
         token = create_token(
             data={"id": user.id},
@@ -145,7 +168,11 @@ async def signup(request: Request, form_data: SignupForm):
         )
         hashed = get_password_hash(form_data.password)
         user = Auths.insert_new_auth(
-            form_data.email.lower(), hashed, form_data.name, role
+            form_data.email.lower(),
+            hashed,
+            form_data.name,
+            form_data.profile_image_url,
+            role,
         )
 
         if user:
@@ -155,6 +182,62 @@ async def signup(request: Request, form_data: SignupForm):
             )
             # response.set_cookie(key='token', value=token, httponly=True)
 
+            if request.app.state.WEBHOOK_URL:
+                post_webhook(
+                    request.app.state.WEBHOOK_URL,
+                    WEBHOOK_MESSAGES.USER_SIGNUP(user.name),
+                    {
+                        "action": "signup",
+                        "message": WEBHOOK_MESSAGES.USER_SIGNUP(user.name),
+                        "user": user.model_dump_json(exclude_none=True),
+                    },
+                )
+
+            return {
+                "token": token,
+                "token_type": "Bearer",
+                "id": user.id,
+                "email": user.email,
+                "name": user.name,
+                "role": user.role,
+                "profile_image_url": user.profile_image_url,
+            }
+        else:
+            raise HTTPException(500, detail=ERROR_MESSAGES.CREATE_USER_ERROR)
+    except Exception as err:
+        raise HTTPException(500, detail=ERROR_MESSAGES.DEFAULT(err))
+
+
+############################
+# AddUser
+############################
+
+
+@router.post("/add", response_model=SigninResponse)
+async def add_user(form_data: AddUserForm, user=Depends(get_admin_user)):
+
+    if not validate_email_format(form_data.email.lower()):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.INVALID_EMAIL_FORMAT
+        )
+
+    if Users.get_user_by_email(form_data.email.lower()):
+        raise HTTPException(400, detail=ERROR_MESSAGES.EMAIL_TAKEN)
+
+    try:
+
+        print(form_data)
+        hashed = get_password_hash(form_data.password)
+        user = Auths.insert_new_auth(
+            form_data.email.lower(),
+            hashed,
+            form_data.name,
+            form_data.profile_image_url,
+            form_data.role,
+        )
+
+        if user:
+            token = create_token(data={"id": user.id})
             return {
                 "token": token,
                 "token_type": "Bearer",
@@ -237,3 +320,40 @@ async def update_token_expires_duration(
         return request.app.state.JWT_EXPIRES_IN
     else:
         return request.app.state.JWT_EXPIRES_IN
+
+
+############################
+# API Key
+############################
+
+
+# create api key
+@router.post("/api_key", response_model=ApiKey)
+async def create_api_key_(user=Depends(get_current_user)):
+    api_key = create_api_key()
+    success = Users.update_user_api_key_by_id(user.id, api_key)
+    if success:
+        return {
+            "api_key": api_key,
+        }
+    else:
+        raise HTTPException(500, detail=ERROR_MESSAGES.CREATE_API_KEY_ERROR)
+
+
+# delete api key
+@router.delete("/api_key", response_model=bool)
+async def delete_api_key(user=Depends(get_current_user)):
+    success = Users.update_user_api_key_by_id(user.id, None)
+    return success
+
+
+# get api key
+@router.get("/api_key", response_model=ApiKey)
+async def get_api_key(user=Depends(get_current_user)):
+    api_key = Users.get_user_api_key_by_id(user.id)
+    if api_key:
+        return {
+            "api_key": api_key,
+        }
+    else:
+        raise HTTPException(404, detail=ERROR_MESSAGES.API_KEY_NOT_FOUND)
